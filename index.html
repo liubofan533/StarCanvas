@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>萤光粒子 · 鼠标聚合 | 动态连线小球</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #0a0c0f;
+            overflow: hidden;
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            cursor: none; /* 隐藏默认鼠标，让视觉效果更纯净，可改为 default 以显示 */
+            transition: filter 0.2s ease;
+        }
+
+        /* 优雅的小提示，不影响交互 */
+        .hint {
+            position: fixed;
+            bottom: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(180, 200, 255, 0.5);
+            font-size: 14px;
+            letter-spacing: 1px;
+            background: rgba(10, 15, 20, 0.4);
+            backdrop-filter: blur(4px);
+            padding: 6px 18px;
+            border-radius: 40px;
+            border: 1px solid rgba(120, 160, 255, 0.2);
+            pointer-events: none;
+            z-index: 10;
+            white-space: nowrap;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        }
+        .hint i {
+            font-style: normal;
+            color: #aac8ff;
+            margin: 0 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="hint">✨ 鼠标移动 — <i>周围小球聚合</i> ✨</div>
+    <canvas id="particleCanvas"></canvas>
+
+    <script>
+        (function() {
+            // ----- 配置参数 (可自由调节) -----
+            const PARTICLE_COUNT = 160;            // 小球数量 (适当增加更密集)
+            const CONNECT_DIST = 130;               // 连线最大距离 (像素)
+            const ATTRACTION_RADIUS = 160;           // 鼠标吸引半径
+            const ATTRACTION_FORCE = 0.028;           // 吸引力系数 (鼠标周围聚集强度)
+            const RANDOM_WALK = 0.18;                 // 随机游走强度 (让粒子保持活力)
+            const DAMPING = 0.975;                     // 速度阻尼 (每次迭代衰减)
+            const BOUNCE_DAMP = 0.7;                    // 边界反弹能量保留
+            const PARTICLE_SIZE = 3.8;                   // 小球基础半径
+            const LINE_OPACITY_MAX = 0.45;                // 连线最大透明度
+
+            // ----- 全局变量 -----
+            const canvas = document.getElementById('particleCanvas');
+            const ctx = canvas.getContext('2d');
+
+            let width, height;                // 画布实际像素尺寸 (canvas.width / height)
+            let particles = [];
+            let mouseX = 0, mouseY = 0;        // 鼠标在 canvas 坐标系中的位置
+            let mouseInside = false;            // 鼠标是否在画布内
+
+            // ----- 初始化粒子 (随机位置，随机小速度) -----
+            function initParticles(count) {
+                const newParticles = [];
+                for (let i = 0; i < count; i++) {
+                    newParticles.push({
+                        x: Math.random() * width,
+                        y: Math.random() * height,
+                        vx: (Math.random() - 0.5) * 1.8,   // 随机初始速度
+                        vy: (Math.random() - 0.5) * 1.8
+                    });
+                }
+                return newParticles;
+            }
+
+            // ----- 更新画布尺寸 (resize 时调用) -----
+            function resizeCanvas() {
+                width = window.innerWidth;
+                height = window.innerHeight;
+
+                // 设置 canvas 实际像素尺寸 (避免模糊)
+                canvas.width = width;
+                canvas.height = height;
+
+                // 如果粒子数组尚未创建，创建；如果已经存在，不重置粒子位置，只是让边界处理自然适应
+                if (particles.length === 0) {
+                    particles = initParticles(PARTICLE_COUNT);
+                } else {
+                    // 可选: 为了让分布更快适应新屏幕，可以轻微随机重置一小部分？但保留现有位置更连贯
+                    // 这里不做重置，仅依靠边界约束和自然运动填充新区域
+                }
+            }
+
+            // ----- 事件监听：鼠标移动 (跟踪位置) -----
+            canvas.addEventListener('mousemove', (e) => {
+                const rect = canvas.getBoundingClientRect();
+                // 计算相对于 canvas 坐标 (考虑 CSS 缩放，但 canvas 像素与CSS一致因为我们设置了canvas.width=innerWidth)
+                mouseX = e.clientX - rect.left;
+                mouseY = e.clientY - rect.top;
+                mouseInside = true;
+            });
+
+            // 鼠标离开画布，停止吸引
+            canvas.addEventListener('mouseleave', () => {
+                mouseInside = false;
+            });
+
+            // 鼠标进入画布 (重新激活，但不需额外操作，除非之前移出)
+            canvas.addEventListener('mouseenter', () => {
+                // 可选: 但保持 mouseInside 已经在 mouseleave 时设为 false, 进入后等待移动事件更新位置
+                // 如果不移动直接进入，mouseInside 应为 false 直到移动。也可直接设为 true，但位置未知。
+                // 为了准确，我们保持 mouseInside 由移动/离开控制。
+            });
+
+            // 窗口大小改变
+            window.addEventListener('resize', () => {
+                resizeCanvas();
+            });
+
+            // ----- 动画与绘制 (核心) -----
+            function animate() {
+                // 更新粒子物理 (鼠标吸引 + 随机运动 + 阻尼 + 边界)
+                updateParticles();
+
+                // 绘制画布
+                drawCanvas();
+
+                requestAnimationFrame(animate);
+            }
+
+            function updateParticles() {
+                if (!particles.length) return;
+
+                const attrRadiusSq = ATTRACTION_RADIUS * ATTRACTION_RADIUS;
+
+                for (let i = 0; i < particles.length; i++) {
+                    const p = particles[i];
+
+                    // ---- 1. 鼠标吸引力 (只在鼠标位于画布内且距离小于吸引半径时生效) ----
+                    if (mouseInside) {
+                        const dx = mouseX - p.x;
+                        const dy = mouseY - p.y;
+                        const distSq = dx * dx + dy * dy;
+
+                        if (distSq < attrRadiusSq && distSq > 0.01) {
+                            const dist = Math.sqrt(distSq);
+                            // 吸引力随距离线性减弱 (近处强，远处弱)，但保持方向
+                            const factor = ATTRACTION_FORCE * (1 - dist / ATTRACTION_RADIUS);
+                            p.vx += dx * factor;
+                            p.vy += dy * factor;
+                        }
+                    }
+
+                    // ---- 2. 随机游走 (让粒子永不静止，保持灵动) ----
+                    p.vx += (Math.random() - 0.5) * RANDOM_WALK;
+                    p.vy += (Math.random() - 0.5) * RANDOM_WALK;
+
+                    // ---- 3. 速度阻尼 ----
+                    p.vx *= DAMPING;
+                    p.vy *= DAMPING;
+
+                    // ---- 4. 更新位置 ----
+                    p.x += p.vx;
+                    p.y += p.vy;
+
+                    // ---- 5. 边界处理 (反弹 + 限制在画布内) ----
+                    // 左边界
+                    if (p.x < 0) {
+                        p.x = 0;
+                        p.vx = -p.vx * BOUNCE_DAMP;
+                    }
+                    // 右边界
+                    else if (p.x > width) {
+                        p.x = width;
+                        p.vx = -p.vx * BOUNCE_DAMP;
+                    }
+
+                    // 上边界
+                    if (p.y < 0) {
+                        p.y = 0;
+                        p.vy = -p.vy * BOUNCE_DAMP;
+                    }
+                    // 下边界
+                    else if (p.y > height) {
+                        p.y = height;
+                        p.vy = -p.vy * BOUNCE_DAMP;
+                    }
+                }
+            }
+
+            function drawCanvas() {
+                // 清空背景 (深色渐变，增加层次)
+                ctx.clearRect(0, 0, width, height);
+                
+                // 绘制深邃星空背景 (简单的径向渐变增加氛围)
+                const gradient = ctx.createRadialGradient(width * 0.5, height * 0.5, 0, width * 0.5, height * 0.5, Math.max(width, height) * 0.6);
+                gradient.addColorStop(0, '#0f1217');
+                gradient.addColorStop(1, '#030405');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, width, height);
+
+                // ---- 先绘制连线 (底层) ----
+                const connectDistSq = CONNECT_DIST * CONNECT_DIST;
+                ctx.lineWidth = 1.4;
+
+                // 遍历所有粒子对 (i < j)
+                for (let i = 0; i < particles.length; i++) {
+                    const p1 = particles[i];
+                    for (let j = i + 1; j < particles.length; j++) {
+                        const p2 = particles[j];
+                        const dx = p1.x - p2.x;
+                        const dy = p1.y - p2.y;
+                        const distSq = dx * dx + dy * dy;
+
+                        if (distSq < connectDistSq) {
+                            const dist = Math.sqrt(distSq);
+                            // 透明度根据距离线性变化 (越近越明显)
+                            const alpha = LINE_OPACITY_MAX * (1 - dist / CONNECT_DIST);
+                            // 线条颜色: 冷白带一点点蓝，非常淡雅
+                            ctx.strokeStyle = `rgba(190, 210, 255, ${alpha})`;
+                            
+                            ctx.beginPath();
+                            ctx.moveTo(p1.x, p1.y);
+                            ctx.lineTo(p2.x, p2.y);
+                            ctx.stroke();
+                        }
+                    }
+                }
+
+                // ---- 再绘制小球 (顶层) ----
+                for (let i = 0; i < particles.length; i++) {
+                    const p = particles[i];
+
+                    // 小球光晕效果 (外发光感)
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, PARTICLE_SIZE * 1.4, 0, Math.PI * 2);
+                    ctx.fillStyle = 'rgba(140, 180, 255, 0.15)';
+                    ctx.fill();
+
+                    // 核心亮点 (内部渐变)
+                    const gradient = ctx.createRadialGradient(p.x - 1, p.y - 1, 1, p.x, p.y, PARTICLE_SIZE * 2);
+                    gradient.addColorStop(0, '#ffffff');
+                    gradient.addColorStop(0.5, '#a0c0ff');
+                    gradient.addColorStop(1, '#6080c0');
+
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, PARTICLE_SIZE, 0, Math.PI * 2);
+                    ctx.fillStyle = gradient;
+                    ctx.fill();
+
+                    // 加一小点高光
+                    ctx.beginPath();
+                    ctx.arc(p.x - 1, p.y - 1, PARTICLE_SIZE * 0.3, 0, Math.PI * 2);
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+                    ctx.fill();
+                }
+
+                // ---- 如果鼠标在画布内，绘制一个微弱的引导圈 (增强互动感) ----
+                if (mouseInside) {
+                    ctx.beginPath();
+                    ctx.arc(mouseX, mouseY, ATTRACTION_RADIUS, 0, 2 * Math.PI);
+                    ctx.strokeStyle = 'rgba(140, 200, 255, 0.22)';
+                    ctx.lineWidth = 1.2;
+                    ctx.setLineDash([6, 8]);
+                    ctx.stroke();
+                    ctx.setLineDash([]); // 恢复实线
+
+                    // 鼠标位置小光点
+                    ctx.beginPath();
+                    ctx.arc(mouseX, mouseY, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'rgba(220, 240, 255, 0.4)';
+                    ctx.fill();
+                    ctx.beginPath();
+                    ctx.arc(mouseX, mouseY, 3, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+                    ctx.fill();
+                }
+            }
+
+            // ----- 启动一切 -----
+            function init() {
+                resizeCanvas();          // 设置宽高并初始化粒子
+                if (particles.length === 0) {
+                    particles = initParticles(PARTICLE_COUNT);
+                }
+                animate();
+            }
+
+            // 页面加载完成开始
+            window.addEventListener('load', init);
+
+            // 可选：处理触摸设备简单模拟 (用触摸点代替鼠标)
+            canvas.addEventListener('touchmove', (e) => {
+                e.preventDefault(); // 阻止滚动
+                const rect = canvas.getBoundingClientRect();
+                const touch = e.touches[0];
+                if (touch) {
+                    mouseX = touch.clientX - rect.left;
+                    mouseY = touch.clientY - rect.top;
+                    mouseInside = true;
+                }
+            });
+            canvas.addEventListener('touchend', () => {
+                mouseInside = false;
+            });
+            canvas.addEventListener('touchcancel', () => {
+                mouseInside = false;
+            });
+        })();
+    </script>
+</body>
+</html>
